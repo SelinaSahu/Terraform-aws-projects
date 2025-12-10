@@ -1,8 +1,12 @@
 terraform {
   required_providers {
     aws = {
-      source = "hashicorp/aws"
+      source  = "hashicorp/aws"
       version = "6.14.1"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "3.6.2"
     }
   }
 }
@@ -11,52 +15,61 @@ provider "aws" {
   region = "eu-north-1"
 }
 
-#create a vpc
-resource "aws_vpc" "my_vpc" {
-  cidr_block = "10.0.0.0/16"
-  tags = {
-    Name = "my_vpc"
-  }
-}  
-
-#Private subnet
-resource "aws_subnet" "private-subnet" {
-  cidr_block = "10.0.1.0/24"
-  vpc_id     = aws_vpc.my_vpc.id
-  tags = {
-    Name = "private-subnet"
-  }
+resource "random_id" "rand_id" {
+  byte_length = 8
 }
 
-
-#Public subnet
-resource "aws_subnet" "public-subnet" {
-  cidr_block = "10.0.2.0/24"
-  vpc_id     = aws_vpc.my_vpc.id
-  tags = {
-    Name = "public-subnet"
-  }
+resource "aws_s3_bucket" "webapp_bucket" {
+  bucket = "webapp-bucket-${random_id.rand_id.hex}"
 }
 
-#internet gateway
-resource "aws_internet_gateway" "my-igw" {
-  vpc_id = aws_vpc.my_vpc.id
-  tags = {
-    Name ="my-igw"
-  }
+# ✅ Disable Block Public Access first
+resource "aws_s3_bucket_public_access_block" "webapp_bucket_block" {
+  bucket = aws_s3_bucket.webapp_bucket.id
+
+  block_public_acls       = false
+  ignore_public_acls      = false
+  block_public_policy     = false
+  restrict_public_buckets = false
 }
 
-#routing table
-resource "aws_route_table" "my-rt" {
-  vpc_id = aws_vpc.my_vpc.id
+# ✅ Ensure policy is applied AFTER blocking is disabled
+resource "aws_s3_bucket_policy" "webapp" {
+  depends_on = [aws_s3_bucket_public_access_block.webapp_bucket_block]  # <-- Important
 
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.my-igw.id
-  }
+  bucket = aws_s3_bucket.webapp_bucket.id
+  policy = jsonencode(
+    {
+      Version = "2012-10-17",
+      Statement = [
+        {
+          Sid       = "PublicReadGetObject",
+          Effect    = "Allow",
+          Principal = "*",
+          Action    = "s3:GetObject",
+          Resource  = "${aws_s3_bucket.webapp_bucket.arn}/*"
+        }
+      ]
+    }
+  )
 }
 
-resource "aws_route_table_association" "public-sub" {
-  route_table_id = aws_route_table.my-rt.id
-  subnet_id = aws_subnet.public-subnet.id
+# ✅ Upload your static website files
+resource "aws_s3_object" "index_html" {
+  bucket       = aws_s3_bucket.webapp_bucket.bucket
+  source       = "./index.html"
+  key          = "index.html"
+  content_type = "text/html"
+}
+
+resource "aws_s3_object" "styles_css" {
+  bucket       = aws_s3_bucket.webapp_bucket.bucket
+  source       = "./styles.css"
+  key          = "styles.css"
+  content_type = "text/css"
+}
+
+# ✅ Output the random ID used in bucket name
+output "name" {
+  value = random_id.rand_id.hex
 }
