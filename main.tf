@@ -2,11 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "6.14.1"
-    }
-    random = {
-      source  = "hashicorp/random"
-      version = "3.6.2"
+      version = "5.54.1"
     }
   }
 }
@@ -15,61 +11,46 @@ provider "aws" {
   region = "eu-north-1"
 }
 
-resource "random_id" "rand_id" {
-  byte_length = 8
+locals {
+    users_data = yamldecode(file("./users/yaml")).users
+    user_role_pair = flatten([for user in local.users_data : [for role in user.roles : {
+        username = user.username
+        role = role
+    }]])
 }
 
-resource "aws_s3_bucket" "webapp_bucket" {
-  bucket = "webapp-bucket-${random_id.rand_id.hex}"
+output "output" {
+  value = local.user_role_pair
 }
 
-# ✅ Disable Block Public Access first
-resource "aws_s3_bucket_public_access_block" "webapp_bucket_block" {
-  bucket = aws_s3_bucket.webapp_bucket.id
-
-  block_public_acls       = false
-  ignore_public_acls      = false
-  block_public_policy     = false
-  restrict_public_buckets = false
+#creating users
+resource "aws_iam_user" "users" {
+  for_each = toset(local.users_data[*].username)
+  name = each.value
 }
 
-# ✅ Ensure policy is applied AFTER blocking is disabled
-resource "aws_s3_bucket_policy" "webapp" {
-  depends_on = [aws_s3_bucket_public_access_block.webapp_bucket_block]  # <-- Important
+#password creation
+resource "aws_iam_user_login_profile" "profile" {
+  for_each = aws_iam_user.users
+  user = each.value.name
+  password_length = 12
 
-  bucket = aws_s3_bucket.webapp_bucket.id
-  policy = jsonencode(
-    {
-      Version = "2012-10-17",
-      Statement = [
-        {
-          Sid       = "PublicReadGetObject",
-          Effect    = "Allow",
-          Principal = "*",
-          Action    = "s3:GetObject",
-          Resource  = "${aws_s3_bucket.webapp_bucket.arn}/*"
-        }
-      ]
-    }
-  )
+  lifecycle {
+    ignore_changes = [ 
+        password_length,
+        password_reset_required,
+        pgp_key,
+     ]
+  }
 }
 
-# ✅ Upload your static website files
-resource "aws_s3_object" "index_html" {
-  bucket       = aws_s3_bucket.webapp_bucket.bucket
-  source       = "./index.html"
-  key          = "index.html"
-  content_type = "text/html"
-}
+#Attaching policies
+resource "aws_iam_user_policy_attachment" "main" {
+  for_each = {
+   for pair in local.user_role_pair : 
+   "${pair.username}-${pair.role}" => pair
+  }
 
-resource "aws_s3_object" "styles_css" {
-  bucket       = aws_s3_bucket.webapp_bucket.bucket
-  source       = "./styles.css"
-  key          = "styles.css"
-  content_type = "text/css"
-}
-
-# ✅ Output the random ID used in bucket name
-output "name" {
-  value = random_id.rand_id.hex
+  user = aws_iam_user.users[each.value.username].name
+  policy_arn = "arn:aws:iam::aws:policy/${each.value.role}"
 }
